@@ -63,7 +63,7 @@ Valuation (USD billions)
 ## Quick start
 
 ```bash
-git clone https://github.com/<your-username>/equity-valuation-tool.git
+git clone https://github.com/AbbieLiu999/equity-valuation-tool.git
 cd equity-valuation-tool
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
@@ -219,7 +219,7 @@ This project is for education and research and is not investment advice. Data co
 
 ## Author
 
-[Your name]. MS in Computer Science student at Northeastern University, previously worked in equity investment. [LinkedIn]
+Dan Liu. MS in Computer Science student at Northeastern University, previously worked in equity investment. https://www.linkedin.com/in/dan-liu-70b32458/
 
 ## License
 
