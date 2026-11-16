@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS financials (
     filed      TEXT,
     PRIMARY KEY (cik, period_end, metric)
 );
+
+CREATE TABLE IF NOT EXISTS prices (
+    cik    TEXT NOT NULL REFERENCES companies(cik),
+    date   TEXT NOT NULL,
+    close  REAL NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (cik, date)
+);
 """
 
 
@@ -43,6 +51,17 @@ def init_db():
     conn.executescript(SCHEMA)
     conn.close()
 
+
+def query_one(sql, params):
+    """Run a SELECT and return the first row as a dict, or None if there is none."""
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row  # lets us turn each row into a dict
+    row = conn.execute(sql, params).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# ---------- Saving ----------
 
 def save_company(info):
     """Insert a company, or update its details if it's already stored."""
@@ -79,19 +98,67 @@ def save_financials(cik, rows):
     conn.close()
 
 
+def save_price(cik, price):
+    """Store one closing price (a dict with date, close and source).
+
+    Prices are kept by date, so running updates on different days builds a history.
+    """
+    conn = get_connection()
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO prices (cik, date, close, source) VALUES (?, ?, ?, ?)",
+            (cik, price["date"], price["close"], price["source"]),
+        )
+    conn.close()
+
+
+# ---------- Loading ----------
+
+def list_tickers():
+    """Return the tickers of all companies stored in the database."""
+    conn = get_connection()
+    tickers = [row[0] for row in conn.execute("SELECT ticker FROM companies")]
+    conn.close()
+    return tickers
+
+
 def load_company(ticker):
     """Return one company's details as a dict, or None if it isn't stored."""
-    conn = get_connection()
-    conn.row_factory = sqlite3.Row  # lets us turn each row into a dict
-    row = conn.execute(
-        "SELECT * FROM companies WHERE ticker = ?", (ticker.upper(),)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    return query_one("SELECT * FROM companies WHERE ticker = ?", (ticker.upper(),))
+
+
+def load_latest(ticker, metric):
+    """Return the most recent stored value of one metric as a dict, or None."""
+    return query_one(
+        """
+        SELECT f.period_end, f.value, f.source_tag, f.accn
+        FROM financials f
+        JOIN companies c ON f.cik = c.cik
+        WHERE c.ticker = ? AND f.metric = ?
+        ORDER BY f.period_end DESC
+        LIMIT 1
+        """,
+        (ticker.upper(), metric),
+    )
+
+
+def load_latest_price(ticker):
+    """Return the most recent stored price as a dict (date, close, source), or None."""
+    return query_one(
+        """
+        SELECT p.date, p.close, p.source
+        FROM prices p
+        JOIN companies c ON p.cik = c.cik
+        WHERE c.ticker = ?
+        ORDER BY p.date DESC
+        LIMIT 1
+        """,
+        (ticker.upper(),),
+    )
 
 
 def load_financials(ticker):
-    """Load one company's financials as a wide table: one row per fiscal year."""
+    """Load one company's annual financials as a wide table: one row per fiscal year."""
     conn = get_connection()
     long_df = pd.read_sql_query(
         """
@@ -110,15 +177,9 @@ def load_financials(ticker):
     # Long to wide: one row per period, one column per metric.
     df = long_df.pivot(index="period_end", columns="metric", values="value")
     # Every metric gets a column, even if this company has no data for it.
+    # (This also drops shares_outstanding, which is loaded with load_latest instead.)
     df = df.reindex(columns=list(METRIC_TAGS))
     df.columns.name = None
     df.index = pd.to_datetime(df.index)
     # Keep only fiscal year ends (rows where revenue exists), oldest to newest.
     return df.sort_index().dropna(subset=["revenue"])
-
-def list_tickers():
-    """Return the tickers of all companies stored in the database."""
-    conn = get_connection()
-    tickers = [row[0] for row in conn.execute("SELECT ticker FROM companies")]
-    conn.close()
-    return tickers

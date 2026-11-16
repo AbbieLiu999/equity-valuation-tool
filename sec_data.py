@@ -4,7 +4,7 @@ from datetime import date
 import requests
 
 # Replace with your own name and email (SEC requires contact info).
-HEADERS = {"User-Agent": "Dan Liu abbieliu666@gmail.com"}
+HEADERS = {"User-Agent": "Your Name your.email@example.com"}
 
 # Each metric maps to a list of XBRL tags, in priority order.
 # Companies use different tags, and sometimes switch tags over the years.
@@ -31,6 +31,23 @@ METRIC_TAGS = {
         "PaymentsToAcquireProductiveAssets",
     ],
     "cash": ["CashAndCashEquivalentsAtCarryingValue"],
+    # Balance sheet items for the enterprise value bridge
+    "short_term_investments": [
+        "MarketableSecuritiesCurrent",
+        "ShortTermInvestments",
+        "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
+        "DebtSecuritiesCurrent",
+    ],
+    "long_term_investments": [
+        "MarketableSecuritiesNoncurrent",
+        "AvailableForSaleSecuritiesDebtSecuritiesNoncurrent",
+    ],
+    "long_term_debt": ["LongTermDebt"],  # total, including the current portion
+    "long_term_debt_noncurrent": ["LongTermDebtNoncurrent"],
+    "long_term_debt_current": ["LongTermDebtCurrent"],
+    "short_term_debt": ["CommercialPaper", "ShortTermBorrowings"],
+    "finance_lease_liabilities": ["FinanceLeaseLiability"],
+    "minority_interest": ["MinorityInterest"],
 }
 
 
@@ -70,15 +87,19 @@ def get_company_facts(cik):
 
 
 def is_annual(entry):
-    """True if the entry comes from a 10-K and covers a full year.
+    """True if the entry can be used as annual data.
 
-    Balance sheet items (like cash) are a single point in time, so they
-    have no "start" date and are always kept.
+    Income and cash flow items cover a period, so they must come from a 10-K
+    and span about a year. Balance sheet items are a single date, so the date
+    alone identifies them: they're also accepted from 10-Qs, because a later
+    quarterly report sometimes repeats the fiscal year end balance under a new
+    tag (NVIDIA's marketable securities, for example). Quarter-end balances are
+    dropped later, when load_financials keeps only fiscal year ends.
     """
+    if "start" not in entry:
+        return entry["form"].startswith(("10-K", "10-Q"))
     if not entry["form"].startswith("10-K"):
         return False
-    if "start" not in entry:
-        return True
     start = date.fromisoformat(entry["start"])
     end = date.fromisoformat(entry["end"])
     return 340 <= (end - start).days <= 390
@@ -110,6 +131,27 @@ def get_annual_values(facts, tags):
     return values
 
 
+def get_latest_shares(facts):
+    """Return the most recent share count from a 10-K or 10-Q cover page, or None.
+
+    This comes from the "dei" taxonomy (cover page information), not us-gaap,
+    and its date is the cover page date, not a fiscal year end.
+    """
+    dei = facts["facts"].get("dei", {})
+    entries = dei.get("EntityCommonStockSharesOutstanding", {}).get("units", {}).get("shares", [])
+    entries = [e for e in entries if e["form"].startswith(("10-K", "10-Q"))]
+    if not entries:
+        return None
+    latest = max(entries, key=lambda e: (e["end"], e["filed"]))
+    return {
+        "period_end": latest["end"],
+        "value": latest["val"],
+        "source_tag": "EntityCommonStockSharesOutstanding",
+        "accn": latest["accn"],
+        "filed": latest["filed"],
+    }
+
+
 def get_financial_records(cik):
     """Fetch every metric for one company as a list of rows (long format)."""
     facts = get_company_facts(cik)
@@ -117,6 +159,9 @@ def get_financial_records(cik):
     for metric, tags in METRIC_TAGS.items():
         for end, record in get_annual_values(facts, tags).items():
             rows.append({"cik": cik, "period_end": end, "metric": metric, **record})
+    shares = get_latest_shares(facts)
+    if shares:
+        rows.append({"cik": cik, "metric": "shares_outstanding", **shares})
     return rows
 
 
