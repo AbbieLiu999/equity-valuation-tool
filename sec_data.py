@@ -1,7 +1,6 @@
 """Fetch and clean annual financial data from SEC EDGAR."""
 from datetime import date
 
-import pandas as pd
 import requests
 
 # Replace with your own name and email (SEC requires contact info).
@@ -46,6 +45,22 @@ def get_cik(ticker):
     raise ValueError(f"Ticker not found: {ticker}")
 
 
+def get_company_info(ticker, cik):
+    """Get basic company details: name, industry (SIC code), fiscal year end."""
+    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    response = requests.get(url, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    return {
+        "cik": cik,
+        "ticker": ticker.upper(),
+        "name": data["name"],
+        "sic": data["sic"],
+        "sic_description": data["sicDescription"],
+        "fiscal_year_end": data["fiscalYearEnd"],
+    }
+
+
 def get_company_facts(cik):
     """Download all XBRL financial facts the company has filed."""
     url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
@@ -70,7 +85,10 @@ def is_annual(entry):
 
 
 def get_annual_values(facts, tags):
-    """Return {period_end: value} for one metric, merging several possible tags."""
+    """Return {period_end: record} for one metric, merging several possible tags.
+
+    Each record holds the value plus where it came from (tag and filing).
+    """
     us_gaap = facts["facts"].get("us-gaap", {})
     values = {}
     for tag in tags:
@@ -80,29 +98,30 @@ def get_annual_values(facts, tags):
         annual.sort(key=lambda e: e["filed"])
         tag_values = {}
         for e in annual:
-            tag_values[e["end"]] = e["val"]
+            tag_values[e["end"]] = {
+                "value": e["val"],
+                "source_tag": tag,
+                "accn": e["accn"],
+                "filed": e["filed"],
+            }
         # A higher-priority tag wins; lower-priority tags only fill gaps.
-        for end, val in tag_values.items():
-            values.setdefault(end, val)
+        for end, record in tag_values.items():
+            values.setdefault(end, record)
     return values
 
 
-def get_financials(ticker):
-    """Build a table of annual financials: one row per fiscal year."""
-    facts = get_company_facts(get_cik(ticker))
-    data = {metric: get_annual_values(facts, tags) for metric, tags in METRIC_TAGS.items()}
-    df = pd.DataFrame(data)
-    df.index = pd.to_datetime(df.index)
-    df.index.name = "period_end"
-    # Some companies (like Microsoft) don't report total D&A as one tag,
-    # so fill the gap by adding depreciation and intangible amortization.
-    components = df["depreciation"] + df["amortization"]
-    df["d_and_a"] = df["d_and_a"].fillna(components)
-    # Keep only fiscal year ends (rows where revenue exists), oldest to newest.
-    return df.sort_index().dropna(subset=["revenue"])
+def get_financial_records(cik):
+    """Fetch every metric for one company as a list of rows (long format)."""
+    facts = get_company_facts(cik)
+    rows = []
+    for metric, tags in METRIC_TAGS.items():
+        for end, record in get_annual_values(facts, tags).items():
+            rows.append({"cik": cik, "period_end": end, "metric": metric, **record})
+    return rows
 
 
 if __name__ == "__main__":
-    df = get_financials("NVDA")
-    print("NVIDIA, last 5 fiscal years (USD billions):")
-    print((df.tail(5) / 1e9).round(1).T)
+    rows = get_financial_records(get_cik("AAPL"))
+    print(f"Apple: {len(rows)} rows. First three:")
+    for row in rows[:3]:
+        print(row)
