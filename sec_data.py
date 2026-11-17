@@ -48,6 +48,18 @@ METRIC_TAGS = {
     "short_term_debt": ["CommercialPaper", "ShortTermBorrowings"],
     "finance_lease_liabilities": ["FinanceLeaseLiability"],
     "minority_interest": ["MinorityInterest"],
+    "interest_expense": ["InterestExpense", "InterestExpenseNonoperating", "InterestExpenseDebt"],
+    "pretax_income": [
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+    ],
+    "income_tax": ["IncomeTaxExpenseBenefit"],
+    "current_assets": ["AssetsCurrent"],
+    "current_liabilities": ["LiabilitiesCurrent"],
+    "ppe_net": ["PropertyPlantAndEquipmentNet"],
+    "goodwill": ["Goodwill"],
+    "intangibles": ["IntangibleAssetsNetExcludingGoodwill"],
+    "rnd": ["ResearchAndDevelopmentExpense"],
 }
 
 

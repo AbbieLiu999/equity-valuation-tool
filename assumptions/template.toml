@@ -1,0 +1,37 @@
+# DCF assumptions for <COMPANY> (<TICKER>)
+#
+# Copy this file to assumptions/<TICKER>.toml and fill it in.
+# Every section has a "source" line: write down where each number comes from,
+# so the model can always be explained. Rates are decimals: 0.05 means 5%.
+# After each earnings call, update the numbers and say why in your Git commit message.
+
+horizon_years = 5     # e.g. 5 for mature companies, 10 for fast growers
+horizon_source = "Why this many years"
+
+[growth]
+# Revenue growth for the first forecast years. Year 1 is the fiscal year in progress.
+# After these, growth fades in a straight line to the terminal rate by the final year.
+near_term = [0.10, 0.08]
+terminal = 0.03       # perpetual growth after the forecast; must be below WACC
+# With Damodaran's implied ERP, terminal growth can go up to the risk-free rate,
+# because his ERP assumes the market's cash flows grow at that rate in the long run.
+terminal_roic = 0.15  # return on new capital after the forecast. Reinvestment = growth / this.
+                      # Close to WACC = no lasting advantage; well above = a durable moat.
+source = "Guidance, consensus or your own research"
+
+[operations]
+ebit_margin_target = 0.30      # reached in the final forecast year
+tax_rate = 0.18
+d_and_a_pct_revenue = 0.03     # D&A as a share of revenue
+capex_pct_revenue = 0.04       # usually at or above D&A, since growth needs reinvestment
+nwc_pct_revenue_change = 0.10  # working capital needed per dollar of extra revenue
+source = "Compare with the 'Last 3 years' line in the run_dcf.py output"
+
+[discount_rate]
+equity_risk_premium = 0.05
+credit_rating = "AA"           # S&P/Fitch style, from AAA to BBB-
+source = "Where the equity risk premium comes from"
+# These are fetched automatically unless you set them:
+# risk_free_rate = 0.043       # 10-year Treasury yield (from FRED)
+# beta = 1.1                   # from yfinance
+# pretax_cost_of_debt = 0.048  # otherwise risk-free rate + the spread for the rating

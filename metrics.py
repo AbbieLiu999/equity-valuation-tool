@@ -45,12 +45,15 @@ def add_derived_metrics(df):
     return df
 
 
-def calculate_valuation(latest, price, shares):
-    """Build the enterprise value bridge and valuation multiples.
+def balance_sheet_bridge(latest):
+    """The items between enterprise value and equity value, from the latest balance sheet.
 
-    latest: the most recent year (one row) of add_derived_metrics() output.
-    Bridge items with no data are counted as 0 and listed in "missing",
+    Debt-like items are positive and cash-like items negative, so that
+    enterprise value = market cap + sum of items, and
+    equity value = enterprise value - sum of items.
+    Items with no data are counted as 0 and listed in "missing",
     so a gap is always visible instead of silently changing the result.
+    Returns (items, missing).
     """
     missing = []
 
@@ -61,8 +64,6 @@ def calculate_valuation(latest, price, shares):
             return 0.0
         return float(value)
 
-    market_cap = price * shares
-
     # Use total long-term debt if it's reported, otherwise add up the two parts.
     if pd.isna(latest["long_term_debt"]):
         long_term_debt = amount("long_term_debt_noncurrent") + amount("long_term_debt_current")
@@ -71,8 +72,7 @@ def calculate_valuation(latest, price, shares):
 
     # Finance leases are included but operating leases are not: under ASC 842,
     # operating lease costs are already deducted before EBITDA, finance lease costs are not.
-    bridge = {
-        "market_cap": market_cap,
+    items = {
         "long_term_debt": long_term_debt,
         "short_term_debt": amount("short_term_debt"),
         "finance_lease_liabilities": amount("finance_lease_liabilities"),
@@ -80,11 +80,22 @@ def calculate_valuation(latest, price, shares):
         "cash": -amount("cash"),
         "investments": -(amount("short_term_investments") + amount("long_term_investments")),
     }
+    return items, missing
+
+
+def calculate_valuation(latest, price, shares):
+    """Build the enterprise value bridge and valuation multiples.
+
+    latest: the most recent year (one row) of add_derived_metrics() output.
+    """
+    items, missing = balance_sheet_bridge(latest)
+    market_cap = price * shares
+    bridge = {"market_cap": market_cap, **items}
     enterprise_value = sum(bridge.values())
 
     ebitda = latest["ebitda"]
-    net_income = latest["net_income"]
     ebit = latest["operating_income"]
+    net_income = latest["net_income"]
     multiples = {
         # Multiples on negative earnings are meaningless, so leave them empty.
         "ev_to_ebitda": enterprise_value / ebitda if ebitda > 0 else math.nan,
@@ -99,3 +110,73 @@ def calculate_valuation(latest, price, shares):
         "multiples": multiples,
         "missing": missing,
     }
+
+
+# ---------- Return on invested capital ----------
+
+def invested_capital(df):
+    """Operating invested capital: operating working capital, net PP&E, goodwill and intangibles.
+
+    Cash, securities and interest-bearing debt are left out, because they are
+    financing decisions, not part of running the business. Goodwill and intangibles
+    count as 0 when not reported; working capital and PP&E must be reported.
+    """
+    def zero_if_missing(column):
+        return df[column].fillna(0)
+
+    operating_assets = (df["current_assets"] - zero_if_missing("cash")
+                        - zero_if_missing("short_term_investments"))
+    operating_liabilities = (df["current_liabilities"] - zero_if_missing("short_term_debt")
+                             - zero_if_missing("long_term_debt_current"))
+    return (operating_assets - operating_liabilities + df["ppe_net"]
+            + zero_if_missing("goodwill") + zero_if_missing("intangibles"))
+
+
+def capitalized_rnd(rnd, life=5):
+    """Treat R&D as an investment written off over `life` years (Damodaran's approach).
+
+    Accounting rules expense R&D immediately, so research-heavy companies look as if
+    they invest almost nothing. Here, each year's R&D becomes an asset that loses
+    1/life of its value per year. Returns two Series: the research asset still on
+    the books, and this year's amortization. Both need `life` earlier years of R&D.
+    """
+    asset = sum(rnd.shift(years) * (life - years) / life for years in range(life))
+    amortization = sum(rnd.shift(years) / life for years in range(1, life + 1))
+    return asset, amortization
+
+
+def add_return_metrics(df, rnd_life=5):
+    """Return a copy of df with NOPAT, invested capital and ROIC, as reported and R&D-adjusted.
+
+    ROIC uses the average of this year's and last year's invested capital, and is
+    left empty when that average isn't positive.
+    """
+    df = df.copy()
+    tax_rate = df["income_tax"] / df["pretax_income"]  # effective rate each year
+
+    df["nopat"] = df["operating_income"] * (1 - tax_rate)
+    df["invested_capital"] = invested_capital(df)
+    average = (df["invested_capital"] + df["invested_capital"].shift()) / 2
+    df["roic"] = (df["nopat"] / average).where(average > 0)
+
+    # R&D-adjusted: add back R&D, subtract its amortization, and add the research asset.
+    research_asset, amortization = capitalized_rnd(df["rnd"], rnd_life)
+    df["research_asset"] = research_asset
+    df["nopat_adjusted"] = df["nopat"] + df["rnd"] - amortization  # R&D stays tax-deductible
+    df["invested_capital_adjusted"] = df["invested_capital"] + research_asset
+    average = (df["invested_capital_adjusted"] + df["invested_capital_adjusted"].shift()) / 2
+    df["roic_adjusted"] = (df["nopat_adjusted"] / average).where(average > 0)
+    return df
+
+
+def incremental_roic(df, nopat_column, capital_column, years):
+    """Return on new capital over the last `years`: extra NOPAT / extra invested capital.
+
+    Empty when invested capital didn't grow, because the ratio is then meaningless.
+    """
+    recent = df[[nopat_column, capital_column]].dropna().tail(years + 1)
+    if len(recent) < years + 1:
+        return math.nan
+    added_nopat = recent[nopat_column].iloc[-1] - recent[nopat_column].iloc[0]
+    added_capital = recent[capital_column].iloc[-1] - recent[capital_column].iloc[0]
+    return added_nopat / added_capital if added_capital > 0 else math.nan
