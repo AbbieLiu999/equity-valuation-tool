@@ -8,17 +8,12 @@ from dataclasses import dataclass, replace
 
 import pandas as pd
 
-from metrics import balance_sheet_bridge
+from metrics import (add_return_metrics, balance_sheet_bridge, incremental_roic,
+                     incremental_sales_to_capital)
 
 REQUIRED_KEYS = {
     "growth": ["near_term", "terminal", "terminal_roic"],
-    "operations": [
-        "ebit_margin_target",
-        "tax_rate",
-        "d_and_a_pct_revenue",
-        "capex_pct_revenue",
-        "nwc_pct_revenue_change",
-    ],
+    "operations": ["ebit_margin_target", "tax_rate", "d_and_a_pct_revenue"],
     "discount_rate": ["equity_risk_premium"],
 }
 
@@ -42,6 +37,13 @@ class DCFInputs:
     valuation_date: pd.Timestamp
     net_claims: float            # debt + leases + minority interest - cash - securities
     shares: float
+    # Optional: capitalize R&D (Damodaran's approach). Leave rnd_pct as None to expense R&D.
+    rnd_pct: float = None        # R&D as a share of revenue in the forecast
+    rnd_life: int = 5            # years over which each year's R&D is written off
+    rnd_history: tuple = ()      # actual R&D in past years, oldest first (at least rnd_life years)
+    # Optional: link reinvestment to growth (Damodaran's approach). When set,
+    # reinvestment = extra revenue / sales_to_capital, and capex_pct and nwc_pct are not used.
+    sales_to_capital: float = None
 
 
 def validate_assumptions(a):
@@ -53,6 +55,11 @@ def validate_assumptions(a):
         for key in keys:
             if key not in a.get(section, {}):
                 problems.append(f"missing {key} in [{section}]")
+    # Reinvestment comes either from sales-to-capital, or from capex and working capital.
+    if "sales_to_capital" not in a.get("operations", {}):
+        for key in ("capex_pct_revenue", "nwc_pct_revenue_change"):
+            if key not in a.get("operations", {}):
+                problems.append(f"missing {key} in [operations] (or set sales_to_capital instead)")
     discount_rate = a.get("discount_rate", {})
     if "credit_rating" not in discount_rate and "pretax_cost_of_debt" not in discount_rate:
         problems.append("[discount_rate] needs either credit_rating or pretax_cost_of_debt")
@@ -61,14 +68,27 @@ def validate_assumptions(a):
         if len(a["growth"]["near_term"]) > a["horizon_years"]:
             problems.append("there are more near-term growth rates than forecast years")
         # Catch "5" typed for 5%: every rate in the file should be a decimal.
+        rate_keys = ["ebit_margin_target", "tax_rate", "d_and_a_pct_revenue",
+                     "capex_pct_revenue", "nwc_pct_revenue_change"]
         rates = {
             "terminal growth": a["growth"]["terminal"],
             "equity_risk_premium": discount_rate["equity_risk_premium"],
-            **{key: a["operations"][key] for key in REQUIRED_KEYS["operations"]},
+            **{key: a["operations"][key] for key in rate_keys if key in a["operations"]},
         }
         for name, rate in rates.items():
             if not -1 < rate < 1:
                 problems.append(f"{name} is {rate}; rates must be decimals, e.g. 0.05 for 5%")
+        operations = a["operations"]
+        if "sales_to_capital" in operations and not 0 < operations["sales_to_capital"] < 50:
+            problems.append("sales_to_capital must be positive, e.g. 1.5 for $1.50 of extra revenue "
+                            "per $1 of extra capital")
+        if "rnd_pct_revenue" in operations:
+            if not 0 <= operations["rnd_pct_revenue"] < 1:
+                problems.append(f"rnd_pct_revenue is {operations['rnd_pct_revenue']}; "
+                                "use a decimal, e.g. 0.08 for 8%")
+            life = operations.get("rnd_life", 5)
+            if not isinstance(life, int) or not 1 <= life <= 15:
+                problems.append("rnd_life must be a whole number of years from 1 to 15")
         roic = a["growth"]["terminal_roic"]
         if not 0 < roic < 5:
             problems.append(f"terminal_roic is {roic}; use a decimal, e.g. 0.30 for 30%")
@@ -88,6 +108,22 @@ def growth_path(near_term, terminal, years):
     for step in range(1, remaining + 1):
         path.append(last + (terminal - last) * step / remaining)
     return path
+
+
+def rnd_amortization(history, forecast, life):
+    """Amortization of capitalized R&D in each forecast year.
+
+    Each year's R&D is written off evenly over the following `life` years, so a
+    year's amortization is 1/life of each of the previous `life` years' R&D.
+    """
+    if len(history) < life:
+        raise ValueError(
+            f"Capitalizing R&D over {life} years needs at least {life} years of R&D history, "
+            f"but only {len(history)} were found."
+        )
+    spending = list(history) + list(forecast)
+    start = len(history)
+    return [sum(spending[i - life:i]) / life for i in range(start, start + len(forecast))]
 
 
 def build_forecast(inputs):
@@ -119,6 +155,38 @@ def build_forecast(inputs):
         })
     forecast = pd.DataFrame(rows)
     forecast.index = [f"FY{end.year}" for end in forecast["year_end"]]
+
+    # The NOPAT that reinvestment earns a return on. When R&D is capitalized
+    # (Damodaran's approach), net R&D (spending minus amortization) is added to it.
+    forecast["nopat_adjusted"] = forecast["nopat"]
+    net_rnd = 0.0
+    if inputs.rnd_pct is not None:
+        forecast["rnd"] = forecast["revenue"] * inputs.rnd_pct
+        amortization = rnd_amortization(inputs.rnd_history, forecast["rnd"], inputs.rnd_life)
+        forecast["rnd_amortization"] = pd.Series(amortization, index=forecast.index)
+        net_rnd = forecast["rnd"] - forecast["rnd_amortization"]
+        forecast["nopat_adjusted"] = forecast["nopat"] + net_rnd  # R&D stays tax-deductible
+
+    if inputs.sales_to_capital is None:
+        # Reinvestment from the capex, D&A and working capital assumptions, plus net R&D.
+        # Adding net R&D to both NOPAT and reinvestment leaves free cash flow unchanged.
+        forecast["reinvestment"] = (forecast["capex"] - forecast["d_and_a"]
+                                    + forecast["nwc_change"] + net_rnd)
+    else:
+        # Reinvestment follows growth: each $1 of extra revenue needs 1 / sales_to_capital
+        # of extra capital. Falling revenue doesn't release capital (floored at 0).
+        prior_revenue = forecast["revenue"].shift(fill_value=inputs.base_revenue)
+        added_revenue = forecast["revenue"] - prior_revenue
+        forecast["reinvestment"] = (added_revenue / inputs.sales_to_capital).clip(lower=0)
+        forecast["fcff"] = forecast["nopat_adjusted"] - forecast["reinvestment"]
+        # What's left for capex beyond D&A and for working capital, after net R&D
+        forecast["net_capex_and_wc"] = forecast["reinvestment"] - net_rnd
+        forecast[["capex", "nwc_change"]] = math.nan  # not used in this mode
+
+    # The return on new capital that the assumptions imply each year:
+    # extra NOPAT this year / what was reinvested the year before.
+    prior = forecast["reinvestment"].shift()
+    forecast["implied_roic"] = (forecast["nopat_adjusted"].diff() / prior).where(prior > 0)
     return forecast
 
 
@@ -149,8 +217,10 @@ def value(inputs):
     # Growth has to be paid for. To grow at g when new capital earns a return of R,
     # a company must reinvest g / R of its NOPAT every year (Damodaran's approach).
     # So terminal free cash flow is next year's NOPAT minus that reinvestment.
+    # With R&D capitalized, NOPAT and the return on new capital are both measured
+    # with R&D treated as investment, so terminal_roic must be on that basis too.
     terminal_reinvestment_rate = g / inputs.terminal_roic
-    terminal_fcff = final["nopat"] * (1 + g) * (1 - terminal_reinvestment_rate)
+    terminal_fcff = final["nopat_adjusted"] * (1 + g) * (1 - terminal_reinvestment_rate)
     terminal_value = terminal_fcff / (inputs.wacc - g)
     pv_terminal = terminal_value * final["discount_factor"]
     pv_forecast = forecast["pv_fcff"].sum()
@@ -166,8 +236,7 @@ def value(inputs):
         "terminal_share": pv_terminal / enterprise_value,
         "terminal_reinvestment_rate": terminal_reinvestment_rate,
         # For comparison: share of NOPAT reinvested in the final forecast year
-        "final_year_reinvestment_rate":
-            (final["capex"] - final["d_and_a"] + final["nwc_change"]) / final["nopat"],
+        "final_year_reinvestment_rate": final["reinvestment"] / final["nopat_adjusted"],
         # Cross-check with the exit multiple method: what EV/EBITDA does the terminal value imply?
         "implied_exit_multiple": terminal_value / (final["ebit"] + final["d_and_a"]),
         "equity_value": equity_value,
@@ -198,8 +267,9 @@ def implied_growth(inputs, price, low=-0.5, high=1.0, iterations=100):
     """Reverse DCF: the constant yearly revenue growth that makes value per share equal the price.
 
     Margins, reinvestment and the terminal value keep their assumed values.
-    Uses bisection: value rises with growth, so we keep halving the interval
-    that contains the answer. Returns None if the answer is outside [low, high].
+    Uses bisection: value rises with growth (as long as new capital earns more than
+    WACC), so we keep halving the interval that contains the answer.
+    Returns None if the answer is outside [low, high].
     """
     years = len(inputs.growth_rates)
 
@@ -237,6 +307,7 @@ def historical_references(history, years=3):
     recent = history.tail(years)
     revenue = recent["revenue"]
     latest = history.iloc[-1]
+    returns = add_return_metrics(history)
     items, _ = balance_sheet_bridge(latest)
     debt = items["long_term_debt"] + items["short_term_debt"] + items["finance_lease_liabilities"]
     return {
@@ -244,6 +315,15 @@ def historical_references(history, years=3):
         "d_and_a_pct": (recent["d_and_a"] / revenue).mean(),
         "capex_pct": (recent["capex"] / revenue).mean(),
         "tax_rate": (recent["income_tax"] / recent["pretax_income"]).mean(),
+        "rnd_pct": (recent["rnd"] / revenue).mean(),
+        "roic": returns["roic"].iloc[-1],
+        "roic_adjusted": returns["roic_adjusted"].iloc[-1],
+        "roic_new": incremental_roic(returns, "nopat", "invested_capital", 5),
+        "roic_new_adjusted": incremental_roic(
+            returns, "nopat_adjusted", "invested_capital_adjusted", 5),
+        "sales_to_capital_new": incremental_sales_to_capital(returns, "invested_capital", 5),
+        "sales_to_capital_new_adjusted": incremental_sales_to_capital(
+            returns, "invested_capital_adjusted", 5),
         # Backward-looking: reflects rates locked in when the debt was issued.
         "interest_rate": latest["interest_expense"] / debt if debt > 0 else math.nan,
     }
@@ -252,7 +332,14 @@ def historical_references(history, years=3):
 def sanity_checks(inputs, result, risk_free_rate):
     """Warnings about assumptions that are allowed but worth a second look."""
     warnings = []
-    if inputs.capex_pct < inputs.d_and_a_pct:
+    forecast = result["forecast"]
+    if inputs.sales_to_capital is not None:
+        if "net_capex_and_wc" in forecast and (forecast["net_capex_and_wc"] < 0).any():
+            warnings.append(
+                "Sales-to-capital implies less reinvestment than net R&D alone in some years, "
+                "so capex would have to fall below D&A. Consider a lower sales_to_capital."
+            )
+    elif inputs.capex_pct < inputs.d_and_a_pct:
         warnings.append(
             "During the forecast, capex is below D&A, so the asset base shrinks while revenue grows."
         )

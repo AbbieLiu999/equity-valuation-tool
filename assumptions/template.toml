@@ -17,14 +17,27 @@ terminal = 0.03       # perpetual growth after the forecast; must be below WACC
 # because his ERP assumes the market's cash flows grow at that rate in the long run.
 terminal_roic = 0.15  # return on new capital after the forecast. Reinvestment = growth / this.
                       # Close to WACC = no lasting advantage; well above = a durable moat.
+                      # Must match how R&D is treated: if rnd_pct_revenue is set below, use the
+                      # "R&D capitalized" ROIC from roic.py; otherwise use the "as reported" one.
 source = "Guidance, consensus or your own research"
 
 [operations]
 ebit_margin_target = 0.30      # reached in the final forecast year
 tax_rate = 0.18
 d_and_a_pct_revenue = 0.03     # D&A as a share of revenue
+# Reinvestment: choose ONE of these two ways.
+# (a) Link it to growth (Damodaran's approach): each $1 of extra revenue needs
+#     1 / sales_to_capital of extra capital. Includes net R&D when R&D is capitalized,
+#     so take it from the matching line of roic.py. Capex and working capital are then not used.
+# sales_to_capital = 1.5
+# (b) Or set capex and working capital directly:
 capex_pct_revenue = 0.04       # usually at or above D&A, since growth needs reinvestment
 nwc_pct_revenue_change = 0.10  # working capital needed per dollar of extra revenue
+# Optional: treat R&D as investment rather than expense (Damodaran's approach).
+# R&D is part of operating costs, so if you raise it, ask whether the EBIT margin should fall.
+# Delete these two lines to expense R&D instead.
+rnd_pct_revenue = 0.08         # R&D as a share of revenue
+rnd_life = 5                   # years over which each year's R&D is written off
 source = "Compare with the 'Last 3 years' line in the run_dcf.py output"
 
 [discount_rate]

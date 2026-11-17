@@ -162,21 +162,32 @@ def add_return_metrics(df, rnd_life=5):
     # R&D-adjusted: add back R&D, subtract its amortization, and add the research asset.
     research_asset, amortization = capitalized_rnd(df["rnd"], rnd_life)
     df["research_asset"] = research_asset
-    df["nopat_adjusted"] = df["nopat"] + df["rnd"] - amortization  # R&D stays tax-deductible
+    # R&D stays fully tax-deductible, so the add-back isn't taxed (Damodaran's approach).
+    df["nopat_adjusted"] = df["nopat"] + df["rnd"] - amortization
     df["invested_capital_adjusted"] = df["invested_capital"] + research_asset
     average = (df["invested_capital_adjusted"] + df["invested_capital_adjusted"].shift()) / 2
     df["roic_adjusted"] = (df["nopat_adjusted"] / average).where(average > 0)
     return df
 
 
-def incremental_roic(df, nopat_column, capital_column, years):
-    """Return on new capital over the last `years`: extra NOPAT / extra invested capital.
+def incremental_ratio(df, numerator, capital_column, years):
+    """Change in `numerator` divided by the change in invested capital over the last `years`.
 
     Empty when invested capital didn't grow, because the ratio is then meaningless.
     """
-    recent = df[[nopat_column, capital_column]].dropna().tail(years + 1)
+    recent = df[[numerator, capital_column]].dropna().tail(years + 1)
     if len(recent) < years + 1:
         return math.nan
-    added_nopat = recent[nopat_column].iloc[-1] - recent[nopat_column].iloc[0]
+    added = recent[numerator].iloc[-1] - recent[numerator].iloc[0]
     added_capital = recent[capital_column].iloc[-1] - recent[capital_column].iloc[0]
-    return added_nopat / added_capital if added_capital > 0 else math.nan
+    return added / added_capital if added_capital > 0 else math.nan
+
+
+def incremental_roic(df, nopat_column, capital_column, years):
+    """Return on new capital over the last `years`: extra NOPAT / extra invested capital."""
+    return incremental_ratio(df, nopat_column, capital_column, years)
+
+
+def incremental_sales_to_capital(df, capital_column, years):
+    """Sales-to-capital on new capital over the last `years`: extra revenue / extra invested capital."""
+    return incremental_ratio(df, "revenue", capital_column, years)

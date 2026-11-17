@@ -8,7 +8,8 @@ import math
 import sys
 
 import db
-from metrics import add_derived_metrics, add_return_metrics, incremental_roic, is_financial
+from metrics import (add_derived_metrics, add_return_metrics, incremental_roic,
+                     incremental_sales_to_capital, is_financial)
 
 
 def pct(rate):
@@ -34,4 +35,8 @@ print(ratios.T.to_string(na_rep="n/a"))
 print("\nReturn on new capital over the last 5 years (extra NOPAT / extra invested capital)")
 print(f"  As reported    {pct(incremental_roic(history, 'nopat', 'invested_capital', 5))}")
 print(f"  R&D-adjusted   {pct(incremental_roic(history, 'nopat_adjusted', 'invested_capital_adjusted', 5))}")
+print("\nSales-to-capital over the last 5 years (extra revenue / extra invested capital)")
+for label, column in (("As reported", "invested_capital"), ("R&D-adjusted", "invested_capital_adjusted")):
+    ratio = incremental_sales_to_capital(history, column, 5)
+    print(f"  {label:<14} {'n/a' if math.isnan(ratio) else f'{ratio:.2f}'}")
 print("\n  n/a: not enough history, or invested capital didn't grow (the ratio is then meaningless).")

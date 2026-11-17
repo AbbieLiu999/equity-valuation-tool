@@ -51,3 +51,20 @@ def test_incremental_roic():
     assert math.isclose(incremental_roic(df, "nopat", "capital", 2), 5 / 25)
     shrinking = pd.DataFrame({"nopat": [10.0, 15.0], "capital": [100.0, 90.0]})
     assert math.isnan(incremental_roic(shrinking, "nopat", "capital", 1))
+
+
+def test_rnd_adjusted_nopat_adds_back_rnd_without_tax():
+    df = make_df(
+        ["2024-12-31", "2025-12-31"],
+        operating_income=[20.0, 30.0], income_tax=[5.0, 5.0], pretax_income=[20.0, 25.0],
+        rnd=[10.0, 14.0],
+    )
+    result = add_return_metrics(df, rnd_life=1)
+    # NOPAT 24, plus this year's R&D 14, minus amortization 10 (last year's R&D, 1-year life).
+    assert math.isclose(result["nopat_adjusted"].iloc[1], 28.0)
+
+
+def test_incremental_sales_to_capital():
+    from metrics import incremental_sales_to_capital
+    df = pd.DataFrame({"revenue": [100.0, 130.0], "capital": [50.0, 70.0]})
+    assert math.isclose(incremental_sales_to_capital(df, "capital", 1), 30 / 20)

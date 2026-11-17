@@ -137,3 +137,94 @@ def test_return_on_new_capital_typed_as_percent_is_caught():
     a["growth"]["terminal_roic"] = 30
     with pytest.raises(ValueError, match="decimal"):
         validate_assumptions(a)
+
+
+# ---------- R&D capitalized (Damodaran's approach) ----------
+
+def with_rnd(**changes):
+    return make_inputs(rnd_pct=0.10, rnd_life=3, rnd_history=(6.0, 7.0, 8.0), **changes)
+
+
+def test_rnd_amortization_uses_the_previous_years():
+    from dcf import rnd_amortization
+    # Year 1: (30 + 60 + 90) / 3. Year 2: (60 + 90 + 120) / 3.
+    assert rnd_amortization([30, 60, 90], [120, 150], life=3) == [60, 90]
+
+
+def test_capitalizing_rnd_leaves_free_cash_flow_unchanged():
+    expensed = build_forecast(make_inputs())
+    capitalized = build_forecast(with_rnd())
+    assert all(math.isclose(a, b) for a, b in zip(expensed["fcff"], capitalized["fcff"]))
+    # Net R&D is added to both NOPAT and reinvestment, so they still net to FCFF.
+    net = capitalized["nopat_adjusted"] - capitalized["reinvestment"]
+    assert all(math.isclose(a, b) for a, b in zip(net, capitalized["fcff"]))
+
+
+def test_terminal_value_uses_capitalized_nopat():
+    result = value(with_rnd())
+    final_nopat = result["forecast"]["nopat_adjusted"].iloc[-1]
+    expected = final_nopat * 1.03 * (1 - 0.03 / 0.15) / (0.09 - 0.03)
+    assert math.isclose(result["terminal_value"], expected)
+
+
+def test_capitalizing_rnd_needs_enough_history():
+    with pytest.raises(ValueError, match="R&D history"):
+        build_forecast(make_inputs(rnd_pct=0.10, rnd_life=5, rnd_history=(6.0, 7.0)))
+
+
+def test_implied_return_on_new_capital():
+    f = build_forecast(make_inputs())
+    expected = (f["nopat_adjusted"].iloc[1] - f["nopat_adjusted"].iloc[0]) / f["reinvestment"].iloc[0]
+    assert math.isclose(f["implied_roic"].iloc[1], expected)
+    assert pd.isna(f["implied_roic"].iloc[0])  # no prior forecast year
+
+
+def test_rnd_assumptions_are_checked():
+    a = make_assumptions(rnd_pct_revenue=9)
+    with pytest.raises(ValueError, match="rnd_pct_revenue"):
+        validate_assumptions(a)
+    a = make_assumptions(rnd_pct_revenue=0.09, rnd_life=0)
+    with pytest.raises(ValueError, match="rnd_life"):
+        validate_assumptions(a)
+
+
+# ---------- Reinvestment linked to growth (sales-to-capital) ----------
+
+def test_sales_to_capital_reinvestment_and_cash_flow():
+    f = build_forecast(make_inputs(growth_rates=[0.10, 0.05], sales_to_capital=2.0))
+    # Revenue 100 -> 110 -> 115.5: extra revenue 10 then 5.5, so reinvestment 5 then 2.75.
+    assert list(f["reinvestment"].round(6)) == [5.0, 2.75]
+    assert all(math.isclose(a, b) for a, b in zip(f["fcff"], f["nopat_adjusted"] - f["reinvestment"]))
+
+
+def test_sales_to_capital_with_rnd_splits_reinvestment():
+    f = build_forecast(with_rnd(sales_to_capital=2.0))
+    net_rnd = f["rnd"] - f["rnd_amortization"]
+    assert all(math.isclose(a, b) for a, b in zip(f["net_capex_and_wc"], f["reinvestment"] - net_rnd))
+
+
+def test_falling_revenue_does_not_release_capital():
+    f = build_forecast(make_inputs(growth_rates=[-0.10], sales_to_capital=2.0))
+    assert f["reinvestment"].iloc[0] == 0
+
+
+def test_reverse_dcf_works_with_sales_to_capital():
+    inputs = make_inputs(growth_rates=[0.12] * 3, sales_to_capital=2.0)
+    price = value(inputs)["per_share"]
+    assert math.isclose(implied_growth(inputs, price), 0.12, abs_tol=1e-6)
+
+
+def test_sales_to_capital_replaces_capex_and_working_capital():
+    a = make_assumptions(sales_to_capital=1.5)
+    del a["operations"]["capex_pct_revenue"]
+    del a["operations"]["nwc_pct_revenue_change"]
+    validate_assumptions(a)  # no error
+    a["operations"]["sales_to_capital"] = 0
+    with pytest.raises(ValueError, match="sales_to_capital"):
+        validate_assumptions(a)
+
+
+def test_warns_when_reinvestment_is_below_net_rnd():
+    inputs = with_rnd(sales_to_capital=40.0)  # almost no reinvestment for the growth assumed
+    warnings = sanity_checks(inputs, value(inputs), risk_free_rate=0.04)
+    assert any("less reinvestment than net R&D" in w for w in warnings)

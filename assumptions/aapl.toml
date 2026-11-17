@@ -12,12 +12,12 @@ horizon_source = "Mature business: growth should settle within five years"
 # After these, growth fades in a straight line to the terminal rate by the final year.
 near_term = [0.07, 0.05]
 terminal = 0.052
-terminal_roic = 0.75
+terminal_roic = 0.37
 source = """
-Near-term growth: Consustent with growth guidance.
+Near-term growth: Consistent with growth guidance.
 Terminal growth: Consistent with Damodaran’s implied ERP, which assumes long-run growth equal to the 10-year Treasury yield. 
-Return on new capital: accounting ROIC on new capital was about 105% over FY2021-26, but invested capital is near zero, so it is noisy. 
-R&D-adjusted ROIC of 116% in FY2026 confirms returns far above WACC. Set below history because R&D spending is rising faster than revenue.
+Return on new capital: about 37%, which is sales-to-capital x the after-tax margin of about 29%, R&D capitalized. 
+Below the historical 51% because that period included margin expansion, which this case doesn't assume.
 """
 
 [operations]
@@ -26,7 +26,10 @@ tax_rate = 0.16
 d_and_a_pct_revenue = 0.028    # FY2026: 2.8%
 capex_pct_revenue = 0.03       # kept at or above D&A, since long-term growth needs reinvestment
 nwc_pct_revenue_change = 0.0   # Apple runs with very little working capital
-source = "STARTING POINT based on recent history. Review against the 'Last 3 years' line"
+rnd_pct_revenue = 0.095   # R&D as a share of revenue，FY2026 R&D was 9.6% of revenue
+rnd_life = 5              # years over which each year's R&D is written off
+sales_to_capital = 1.26
+source = "Sales-to-capital: 1.26 on new capital over FY2021-26, R&D capitalized (roic.py)."
 
 [discount_rate]
 equity_risk_premium = 0.044
@@ -37,5 +40,5 @@ credit_rating = "AA+"
 # pretax_cost_of_debt = 0.055  # otherwise risk-free rate + the spread for the rating
 source = """
 Beta: Blume-adjusted, 0.67 x raw 1.09 (yfinance, 5Y monthly) + 0.33 x 1.0 = 1.06. 
-ERP: Damodaran implied ERP, November 2026."
+ERP: Damodaran implied ERP, November 2026.
 """
